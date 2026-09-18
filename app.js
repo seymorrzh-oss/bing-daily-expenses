@@ -2,7 +2,7 @@
 
 /* =========================================================
    饼饼记账 · bing-daily-expenses
-   V1.1.0
+   V1.2.0
    ========================================================= */
 
 const CATS = {
@@ -33,6 +33,75 @@ const TAXI_SERVICES = [
 ];
 
 const KEY = 'bing-daily-expenses-v1';
+const TRIPS = [
+  { id: 'shenzhen-hongkong-2026', name: '2026深圳香港', start: '2026-10-02T16:15', end: '2026-10-07T11:05' }
+];
+const DAILY_FILTER = '__daily__';
+
+function matchTrip(date, time) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date || '') ||
+      !/^([01]\d|2[0-3]):[0-5]\d$/.test(time || '') ||
+      localDate(new Date(date + 'T12:00:00')) !== date) return '';
+  const stamp = date + 'T' + time;
+  return TRIPS.find(trip => stamp >= trip.start && stamp <= trip.end)?.name || '';
+}
+
+function travelTags() {
+  return [...new Set([...TRIPS.map(trip => trip.name), ...db.records.map(r => r.travelTag),
+    ...db.pending.map(r => r.travelTag)].filter(Boolean))];
+}
+
+function matchesLedger(record, selection) {
+  return !selection || (selection === DAILY_FILTER ? !record.travelTag : record.travelTag === selection);
+}
+
+function ledgerOptions(selection, allLabel) {
+  return [{ value: '', label: allLabel }, { value: DAILY_FILTER, label: '日常' },
+    ...travelTags().map(name => ({ value: name, label: name }))]
+    .map(x => `<option value="${esc(x.value)}" ${x.value === selection ? 'selected' : ''}>${esc(x.label)}</option>`).join('');
+}
+
+function travelFields(r) {
+  const selection = r.travelMode || (r.id || r.travelTag ? 'manual' : 'auto');
+  const tag = selection === 'auto' ? matchTrip(r.date, r.time) : (r.travelTag || '');
+  const names = [...new Set([...travelTags(), tag].filter(Boolean))];
+  return `<section class="travel-field"><span class="field-label">✈️ 归入账本</span>
+    <input type="hidden" name="travelTag" value="${esc(tag)}">
+    <input type="hidden" name="travelMode" value="${selection}">
+    <div class="chips ledger-chips">${['', ...names].map(name => `<button type="button" data-ledger="${esc(name)}" aria-pressed="${tag === name}" class="${tag === name ? 'active' : ''}">${name ? esc(name) : '日常'}</button>`).join('')}</div>
+    <p class="hint" data-travel-status>${selection === 'manual' ? '已手动选择，修改日期也保留你的选择。' : r.time ? '按交易日期和时间自动选择，可点击账本覆盖。' : '未填写时间，暂归日常；补全时间后自动判断。'}</p>
+    <button type="button" data-travel-auto class="travel-auto">按时间自动选择</button>
+    <details class="custom-ledger"><summary>其他旅行账本</summary><label>账本名称<input data-custom-ledger maxlength="100" placeholder="输入后点击使用"></label><button type="button" data-use-ledger>使用此账本</button></details>
+  </section>`;
+}
+
+function wireTravel(form) {
+  const tag = form.querySelector('[name="travelTag"]'), mode = form.querySelector('[name="travelMode"]');
+  if (!tag || !mode) return;
+  const refresh = () => {
+    if (mode.value === 'auto') tag.value = matchTrip(form.querySelector('[name="date"]').value, form.querySelector('[name="time"]').value);
+    form.querySelectorAll('[data-ledger]').forEach(button => {
+      button.classList.toggle('active', button.dataset.ledger === tag.value);
+      button.setAttribute('aria-pressed', String(button.dataset.ledger === tag.value));
+    });
+    form.querySelector('[data-travel-status]').textContent = mode.value === 'manual' ? '已手动选择，修改日期也保留你的选择。' : form.querySelector('[name="time"]').value ? '按交易日期和时间自动选择，可点击账本覆盖。' : '未填写时间，暂归日常；补全时间后自动判断。';
+  };
+  form.querySelectorAll('[data-ledger]').forEach(button => button.onclick = () => { mode.value = 'manual'; tag.value = button.dataset.ledger; refresh(); });
+  form.querySelector('[data-travel-auto]').onclick = () => { mode.value = 'auto'; refresh(); };
+  form.querySelectorAll('[name="date"],[name="time"]').forEach(input => { input.addEventListener('input', refresh); input.addEventListener('change', refresh); });
+  form.querySelector('[data-use-ledger]').onclick = () => {
+    const name = form.querySelector('[data-custom-ledger]').value.trim();
+    if (!name) { notify('请先输入旅行账本名称。'); return; }
+    tag.value = name; mode.value = 'manual';
+    const chips = form.querySelector('.ledger-chips');
+    if (![...chips.querySelectorAll('button')].some(b => b.dataset.ledger === name)) {
+      const button = document.createElement('button'); button.type = 'button'; button.dataset.ledger = name; button.textContent = name;
+      button.onclick = () => { tag.value = name; mode.value = 'manual'; refresh(); }; chips.append(button);
+    }
+    refresh();
+  };
+  // Existing records retain their saved tag when opened. Re-evaluate only on a date/time change.
+}
 const PURPOSE_KEY = 'bing-daily-expenses-purpose-history-v1';
 
 const $ = s => document.querySelector(s);
@@ -318,7 +387,8 @@ function fresh() {
 
     payment: r?.payment || '',
     note: '',
-    travelTag: ''
+    travelTag: matchTrip(localDate(), nowTime()),
+    travelMode: 'auto'
   };
 }
 
@@ -708,7 +778,7 @@ function home() {
   $('#export').onclick = () => {
     const url = URL.createObjectURL(
       new Blob(
-        [JSON.stringify({ ...db, appVersion: '1.1.0', purposeHistory }, null, 2)],
+        [JSON.stringify({ ...db, appVersion: '1.2.0', purposeHistory }, null, 2)],
         { type: 'application/json' }
       )
     );
@@ -1098,12 +1168,13 @@ function fields(r, compact = false) {
     </p>
 
 
+    ${travelFields(r)}
     ${
       compact
         ? `
           <details>
             <summary>
-              日期、商家、支付与旅行标签
+              更多信息 · 日期、时间、商家与支付
             </summary>
         `
         : ''
@@ -1161,19 +1232,6 @@ function fields(r, compact = false) {
       </label>
 
     </div>
-
-
-    <label>
-      ✈️ 旅行标签
-
-      <input
-        name="travelTag"
-        list="tags"
-        maxlength="100"
-        placeholder="如：深圳香港2026"
-        value="${esc(r.travelTag || '')}"
-      >
-    </label>
 
 
     <label>
@@ -1261,7 +1319,10 @@ function record(data, old) {
       String(data.note || '').trim(),
 
     travelTag:
-      String(data.travelTag || '').trim(),
+      (data.travelMode || (old || data.travelTag ? 'manual' : 'auto')) === 'auto'
+        ? matchTrip(data.date, data.time)
+        : String(data.travelTag || '').trim(),
+    travelMode: data.travelMode || (old || data.travelTag ? 'manual' : 'auto'),
 
     createdAt:
       old?.createdAt ||
@@ -1295,6 +1356,7 @@ function record(data, old) {
    ========================================================= */
 
 function wireForm(form, redraw) {
+  wireTravel(form);
   form
     .querySelectorAll(
       '[data-type],[data-cat],[data-sub],[data-service],[data-purpose]'
@@ -2409,16 +2471,10 @@ function stats() {
     within(db.records, a, b)
       .filter(
         r =>
-          !statsTag ||
-          r.travelTag === statsTag
+          matchesLedger(r, statsTag)
       );
 
-  const tags =
-    [...new Set(
-      db.records
-        .map(r => r.travelTag)
-        .filter(Boolean)
-    )];
+
 
   $('#main').innerHTML = `
 
@@ -2469,10 +2525,7 @@ function stats() {
         <select id="stats-tag">
 
           ${
-            selectOptions(
-              ['', ...tags],
-              statsTag
-            )
+            ledgerOptions(statsTag, '全部账本')
           }
 
         </select>
@@ -2487,7 +2540,7 @@ function stats() {
         ${a} — ${b}
         ${
           statsTag
-            ? ' · ✈️ ' + esc(statsTag)
+            ? ' · ' + (statsTag === DAILY_FILTER ? '日常' : '✈️ ' + esc(statsTag))
             : ' · 全部账本'
         }
       </p>
@@ -2550,7 +2603,7 @@ function stats() {
 
 
   $('#stats-tag').options[0].textContent =
-    '全部旅行 / 日常';
+    '全部账本';
 
 
   $('#stats-tag').onchange = e => {
@@ -2679,12 +2732,7 @@ function categoryStats(rows, type) {
    ========================================================= */
 
 function list() {
-  const tags =
-    [...new Set(
-      db.records
-        .map(r => r.travelTag)
-        .filter(Boolean)
-    )];
+
 
   const rows =
     sorted(
@@ -2699,8 +2747,7 @@ function list() {
         (!filters.category ||
           r.category === filters.category) &&
 
-        (!filters.tag ||
-          r.travelTag === filters.tag) &&
+        matchesLedger(r, filters.tag) &&
 
         (
           !filters.search ||
@@ -2791,10 +2838,7 @@ function list() {
           <select id="filter-tag">
 
             ${
-              selectOptions(
-                ['', ...tags],
-                filters.tag
-              )
+              ledgerOptions(filters.tag, '全部账本')
             }
 
           </select>
@@ -2840,7 +2884,7 @@ function list() {
     '全部栏目';
 
   $('#filter-tag').options[0].textContent =
-    '全部标签';
+    '全部账本';
 
 
   $('#apply-filter').onclick = () => {
